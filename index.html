@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>簡易スピードテスト</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      text-align: center;
+      padding: 40px;
+    }
+    #result {
+      margin-top: 20px;
+      font-size: 1.5em;
+    }
+    button {
+      padding: 10px 20px;
+      font-size: 1em;
+      border: none;
+      border-radius: 8px;
+      background-color: #4CAF50;
+      color: white;
+      cursor: pointer;
+    }
+    button:disabled {
+      background-color: #999;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <h1>簡易スピードテスト</h1>
+  <p>25MiB ファイルをダウンロードして速度を測定します。</p>
+  <button id="startBtn">テスト開始</button>
+  <div id="result"></div>
+
+  <script>
+    const startBtn = document.getElementById('startBtn');
+    const result = document.getElementById('result');
+
+    async function runSpeedTest() {
+      startBtn.disabled = true;
+      result.textContent = '計測中...';
+
+      const fileUrl = '/25.dat'; // 25MiBファイル
+      const startTime = performance.now();
+
+      try {
+        const response = await fetch(fileUrl + '?cacheBust=' + Date.now(), {
+          cache: 'no-store'
+        });
+
+        if (!response.ok) {
+          throw new Error('ファイル取得エラー: ' + response.status);
+        }
+
+        // データを完全に読み込む
+        const reader = response.body.getReader();
+        let receivedBytes = 0;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          receivedBytes += value.length;
+        }
+
+        const endTime = performance.now();
+        const durationSec = (endTime - startTime) / 1000;
+        const sizeMiB = receivedBytes / (1024 * 1024);
+        const speedMbps = (sizeMiB * 8) / durationSec;
+
+        result.innerHTML = `
+          ダウンロード完了！<br>
+          サイズ: ${sizeMiB.toFixed(2)} MiB<br>
+          所要時間: ${durationSec.toFixed(2)} 秒<br>
+          <b>速度: ${speedMbps.toFixed(2)} Mbps</b>
+        `;
+      } catch (err) {
+        result.textContent = 'エラー: ' + err.message;
+      } finally {
+        startBtn.disabled = false;
+      }
+    }
+
+    startBtn.addEventListener('click', runSpeedTest);
+  </script>
+</body>
+</html>
