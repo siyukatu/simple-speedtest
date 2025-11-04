@@ -153,7 +153,8 @@
     try {
       while (!signal.aborted) {
         w.state = 'fetching';
-        const url = fileUrl + '?_cb=' + Date.now() + Math.random();
+//        const url = fileUrl + '?_cb=' + Date.now() + Math.random();
+        const url = fileUrl;
         let response;
         try {
           response = await fetch(url, { cache: 'no-store', signal });
