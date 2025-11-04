@@ -129,7 +129,7 @@
         const url = fileUrl; // キャッシュを使いたいのでクエリは付けない
         let response;
         try {
-          response = await fetch(url, { cache: 'default', signal });
+          response = await fetch(url, { cache: 'no-store', signal });
         } catch (err) {
           if (signal.aborted) break;
           w.state = 'error(fetch)';
