@@ -1,26 +1,26 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-  <meta charset="utf-8" />
-  <title>並列永久読み込み式 スピードテスト</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    body { font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Hiragino Kaku Gothic ProN", "Noto Sans JP", sans-serif; padding: 24px; max-width: 800px; margin: auto; }
-    label { display:inline-block; margin:8px 0; }
-    input[type="number"] { width: 100px; margin-left:8px; }
-    button { margin-top:12px; padding:10px 16px; border-radius:8px; border:0; background:#1b74e4; color:white; cursor:pointer; }
-    button:disabled { background:#9bbbf7; cursor:not-allowed; }
-    #progress { margin-top:16px; }
-    .bar { height:18px; background:#e6e6e6; border-radius:9px; overflow:hidden; }
-    .bar > i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#4caf50,#2bb673); transition:width 200ms linear; }
-    table { width:100%; margin-top:12px; border-collapse:collapse; }
-    th, td { padding:8px; border-bottom:1px solid #eee; text-align:left; font-size:0.95rem; }
-    .muted { color:#666; font-size:0.9rem; }
-  </style>
+<meta charset="utf-8" />
+<title>並列読み込みスピードテスト（修正版：単位と集計を修正）</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<style>
+  body { font-family: system-ui, -apple-system, Roboto, "Noto Sans JP", sans-serif; padding:20px; max-width:980px; margin:auto; }
+  label { display:inline-block; margin:8px 0; }
+  input[type="number"] { width:90px; margin-left:8px; }
+  input[type="text"] { width:260px; margin-left:8px; }
+  button { padding:8px 14px; border-radius:8px; border:0; background:#1b74e4; color:#fff; cursor:pointer; }
+  button:disabled { background:#9bbbf7; cursor:not-allowed; }
+  .bar { height:16px; background:#eee; border-radius:8px; overflow:hidden; margin-top:12px; }
+  .bar > i { display:block; height:100%; width:0%; background:linear-gradient(90deg,#4caf50,#2bb673); transition:width 180ms linear; }
+  table { width:100%; margin-top:12px; border-collapse:collapse; }
+  th,td { padding:6px 8px; border-bottom:1px solid #eee; text-align:left; font-size:0.92rem; }
+  .muted { color:#666; font-size:0.9rem; }
+</style>
 </head>
 <body>
-  <h1>並列・永遠読み込み式 スピードテスト</h1>
-  <p class="muted">サーバ上にある <code>/25.dat</code> を各接続で繰り返し読み込み、合計読み込み量が目標に達した瞬間に全て中止して結果を表示します。</p>
+  <h1>並列読み込みスピードテスト（単位＆集計修正）</h1>
+  <p class="muted">接続数デフォルト 25。ウォームアップと外れ値を除去して「現在速度」を表示します。合計読み込みで停止（全 Abort）。</p>
 
   <div>
     <label>接続数:
@@ -30,34 +30,29 @@
       <input id="targetMiB" type="number" min="1" value="200" />
     </label>
     <label style="margin-left:16px">ファイルURL:
-      <input id="fileUrl" type="text" value="/25.dat" style="width:220px; margin-left:8px" />
+      <input id="fileUrl" type="text" value="/25.dat" />
     </label>
   </div>
 
-  <div>
+  <div style="margin-top:10px">
     <button id="startBtn">テスト開始</button>
     <button id="stopBtn" disabled style="margin-left:8px; background:#e74c3c">強制停止</button>
   </div>
 
-  <div id="status" style="margin-top:12px"></div>
+  <div id="status" style="margin-top:10px" class="muted"></div>
 
-  <div id="progress">
-    <div class="bar"><i id="barFill"></i></div>
-    <div style="margin-top:6px">
-      合計読み込み: <span id="totalMiB">0.00</span> MiB /
-      <span id="goalMiB">0.00</span> MiB
-      （経過: <span id="elapsed">0.00</span> s）
-    </div>
+  <div class="bar"><i id="barFill"></i></div>
+  <div style="margin-top:8px">
+    合計読み込み: <span id="totalMiB">0.00</span> MiB /
+    <span id="goalMiB">0.00</span> MiB （経過: <span id="elapsed">0.00</span> s）
   </div>
 
-  <table id="connTable" aria-hidden="true" style="display:none">
-    <thead>
-      <tr><th>接続</th><th>読み込み (MiB)</th><th>状態</th><th>現在の速度 (Mbps, 簡易)</th></tr>
-    </thead>
+  <table id="connTable" style="display:none">
+    <thead><tr><th>接続</th><th>読み込み (MiB)</th><th>状態</th><th>瞬時速度 (Mbps)</th></tr></thead>
     <tbody id="connBody"></tbody>
   </table>
 
-  <div id="result" style="margin-top:18px; font-weight:600"></div>
+  <div id="result" style="margin-top:12px; font-weight:600"></div>
 
 <script>
 (() => {
@@ -76,6 +71,12 @@
   const resultDiv = document.getElementById('result');
 
   const BYTES_PER_MIB = 1024 * 1024;
+  // parameters
+  const WARMUP_MS = 1000;
+  const WINDOW_MS = 500;
+  const UI_INTERVAL_MS = 200;
+  const SAMPLE_HISTORY = 20;
+  const MAD_MULTIPLIER = 3.0;
 
   let controller = null;
   let totalBytes = 0;
@@ -84,50 +85,18 @@
   let workers = [];
   let statsInterval = null;
   let running = false;
+  const recentTotalSamples = [];
 
-  function formatMbps(bytes, seconds) {
-    if (seconds <= 0) return '0.00';
-    const mib = bytes / BYTES_PER_MIB;
-    const mbps = (mib * 8) / seconds;
-    return mbps.toFixed(2);
+  function median(arr) {
+    if (!arr.length) return 0;
+    const a = arr.slice().sort((x,y)=>x-y);
+    const m = Math.floor(a.length/2);
+    return (a.length%2===1) ? a[m] : (a[m-1]+a[m])/2;
   }
-
-  function updateUI() {
-    const totalMiB = totalBytes / BYTES_PER_MIB;
-    totalMiBSpan.textContent = totalMiB.toFixed(2);
-    goalMiBSpan.textContent = (targetBytes / BYTES_PER_MIB).toFixed(2);
-
-    let progressPercent = Math.min(100, (totalBytes / targetBytes) * 100);
-    if (!isFinite(progressPercent)) progressPercent = 0;
-    barFill.style.width = progressPercent + '%';
-
-    const elapsed = (performance.now() - startTime) / 1000;
-    elapsedSpan.textContent = elapsed.toFixed(2);
-
-    // 全接続の瞬時速度合計
-    let totalWindowBytes = 0;
-    let totalWindowTime = 0;
-    workers.forEach((w, i) => {
-      totalWindowBytes += w.windowBytes;
-      totalWindowTime += (performance.now() - w.windowStart);
-    });
-    const avgWindowSec = Math.max(0.001, totalWindowTime / (workers.length * 1000));
-    const totalSpeedMbps = formatMbps(totalWindowBytes, avgWindowSec);
-
-    // ステータスメッセージ更新
-    statusDiv.textContent =
-      `接続数: ${workers.length} ｜ 現在速度: ${totalSpeedMbps} Mbps ｜ 合計: ${totalMiB.toFixed(2)} MiB`;
-
-    // per-connection rows
-    workers.forEach((w, i) => {
-      let row = document.getElementById('conn-row-' + i);
-      if (!row) return;
-      const cells = row.children;
-      cells[1].textContent = (w.bytes / BYTES_PER_MIB).toFixed(2);
-      cells[2].textContent = w.state;
-      const sec = Math.max(0.001, (performance.now() - w.windowStart) / 1000);
-      cells[3].textContent = formatMbps(w.windowBytes, sec);
-    });
+  function mad(arr, med) {
+    if (!arr.length) return 0;
+    const dev = arr.map(v => Math.abs(v - med));
+    return median(dev);
   }
 
   function makeConnRow(i) {
@@ -138,77 +107,123 @@
   }
 
   async function workerLoop(index, signal, fileUrl) {
+    const now = performance.now();
     const w = {
       index,
       bytes: 0,
-      windowBytes: 0,
-      windowStart: performance.now(),
+      // window fields for per-worker measurement
+      windowBytesForCalc: 0,
+      windowStartForCalc: now,
+      warmupUntil: now + WARMUP_MS,
       state: 'starting'
     };
     workers[index] = w;
-
     connTable.style.display = '';
     connBody.appendChild(makeConnRow(index));
 
     try {
       while (!signal.aborted) {
         w.state = 'fetching';
-//        const url = fileUrl + '?_cb=' + Date.now() + Math.random();
-        const url = fileUrl;
+        const url = fileUrl + '?_cb=' + Date.now() + Math.random();
         let response;
         try {
           response = await fetch(url, { cache: 'no-store', signal });
-        } catch {
+        } catch (err) {
           if (signal.aborted) break;
           w.state = 'error(fetch)';
-          await new Promise(r => setTimeout(r, 500));
+          await new Promise(r => setTimeout(r, 300));
           continue;
         }
-
-        if (!response.ok) {
-          w.state = 'error(status:' + response.status + ')';
-          await new Promise(r => setTimeout(r, 500));
-          continue;
-        }
+        if (!response.ok) { w.state = 'error(status:' + response.status + ')'; await new Promise(r=>setTimeout(r,300)); continue; }
 
         const reader = response.body.getReader();
         w.state = 'reading';
-
         while (!signal.aborted) {
           let readResult;
-          try {
-            readResult = await reader.read();
-          } catch {
+          try { readResult = await reader.read(); } catch (err) {
             if (signal.aborted) break;
-            w.state = 'error(read)';
-            break;
+            w.state = 'error(read)'; break;
           }
           if (readResult.done) break;
-
           const chunk = readResult.value;
           const n = chunk.length;
           totalBytes += n;
           w.bytes += n;
-          w.windowBytes += n;
 
-          const now = performance.now();
-          if ((now - w.windowStart) > 500) {
-            w.windowStart = now;
-            w.windowBytes = 0;
+          const tnow = performance.now();
+          if ((tnow - w.windowStartForCalc) > WINDOW_MS) {
+            w.windowStartForCalc = tnow;
+            w.windowBytesForCalc = 0;
           }
+          w.windowBytesForCalc += n;
 
           if (totalBytes >= targetBytes) {
-            try { controller.abort(); } catch {}
+            try { controller.abort(); } catch(e) {}
             break;
           }
         }
-        try { reader.releaseLock?.(); } catch {}
+        try { reader.releaseLock?.(); } catch(e) {}
         await Promise.resolve();
       }
     } finally {
       w.state = signal.aborted ? 'aborted' : (w.state || 'finished');
+      // one final UI update for this worker
       updateUI();
     }
+  }
+
+  function updateUI() {
+    const now = performance.now();
+    const totalMiB = totalBytes / BYTES_PER_MIB;
+    totalMiBSpan.textContent = totalMiB.toFixed(2);
+    goalMiBSpan.textContent = (targetBytes / BYTES_PER_MIB).toFixed(2);
+    elapsedSpan.textContent = ((now - startTime)/1000).toFixed(2);
+    const progressPercent = Math.min(100, (totalBytes/targetBytes)*100) || 0;
+    barFill.style.width = progressPercent + '%';
+
+    // --- 正しい瞬時速度計算 ---
+    // 全接続のウィンドウ中の合計バイト数を集計し、共通の windowSec で評価する
+    // ここでは UI 更新間隔をウィンドウ秒として使う（一定の time bucket）
+    const windowSec = Math.max(0.001, UI_INTERVAL_MS / 1000); // 固定ウィンドウ長（秒）
+    let sumWindowBytes = 0;
+    workers.forEach(w => {
+      if (!w) return;
+      // if still warming up, ignore its window bytes (treat as 0 in instant calc)
+      if (performance.now() < w.warmupUntil) return;
+      // use the worker's current window bytes (which reflect last <= WINDOW_MS)
+      sumWindowBytes += w.windowBytesForCalc;
+    });
+    // bits/sec = sumWindowBytes * 8 / windowSec
+    const bitsPerSec = (sumWindowBytes * 8) / windowSec;
+    // Mbps (decimal) = bitsPerSec / 1_000_000
+    const instantMbpsRaw = bitsPerSec / 1_000_000;
+
+    // push sample history and perform median+MAD filtering
+    recentTotalSamples.push(instantMbpsRaw);
+    if (recentTotalSamples.length > SAMPLE_HISTORY) recentTotalSamples.shift();
+    const med = median(recentTotalSamples);
+    const dev = mad(recentTotalSamples, med);
+    const threshold = (dev > 0) ? dev * MAD_MULTIPLIER : Math.max(0.5, med * 0.5);
+    const filtered = recentTotalSamples.filter(s => Math.abs(s - med) <= threshold);
+    const instantMbpsFiltered = filtered.length ? (filtered.reduce((a,b)=>a+b,0)/filtered.length) : med;
+
+    // status: 接続数・現在速度（フィルタ済）・合計
+    statusDiv.textContent = `接続: ${workers.length} ｜ 現在速度 (フィルタ済): ${instantMbpsFiltered.toFixed(2)} Mbps ｜ 合計: ${totalMiB.toFixed(2)} MiB`;
+
+    // per-connection rows
+    workers.forEach((w, i) => {
+      const row = document.getElementById('conn-row-' + i);
+      if (!row) return;
+      const cells = row.children;
+      cells[1].textContent = (w.bytes / BYTES_PER_MIB).toFixed(2);
+      cells[2].textContent = w.state + (performance.now() < w.warmupUntil ? ' (warmup)' : '');
+      // per-connection instant (convert to Mbps decimal)
+      const winMs = Math.max(1, Math.min(WINDOW_MS, performance.now() - w.windowStartForCalc));
+      const winSec = winMs / 1000;
+      const mbits = (w.windowBytesForCalc * 8) / 1_000_000; // Mbit over window
+      const connMbps = isFinite(mbits / winSec) ? (mbits / winSec).toFixed(2) : '0.00';
+      cells[3].textContent = connMbps;
+    });
   }
 
   function startTest() {
@@ -225,21 +240,22 @@
     connBody.innerHTML = '';
     connTable.style.display = 'none';
     resultDiv.textContent = '';
+    recentTotalSamples.length = 0;
     statusDiv.textContent = `接続を ${connCount} 本で開始中...`;
     startBtn.disabled = true;
     stopBtn.disabled = false;
     running = true;
 
     for (let i = 0; i < connCount; i++) {
-      workerLoop(i, controller.signal, fileUrl).catch(console.error);
+      workerLoop(i, controller.signal, fileUrl).catch(err => console.error('worker err', err));
     }
 
-    statsInterval = setInterval(updateUI, 200);
+    statsInterval = setInterval(updateUI, UI_INTERVAL_MS);
     updateUI();
 
     (async () => {
       try {
-        await new Promise((resolve) => {
+        await new Promise(resolve => {
           const sig = controller.signal;
           if (sig.aborted) return resolve();
           sig.addEventListener('abort', () => resolve(), { once: true });
@@ -255,13 +271,13 @@
     const endTime = performance.now();
     const durationSec = Math.max(0.001, (endTime - startTime) / 1000);
     const totalMiB = totalBytes / BYTES_PER_MIB;
-    const mbps = (totalMiB * 8) / durationSec;
-
-    statusDiv.textContent = `計測終了 ｜ 平均速度: ${mbps.toFixed(2)} Mbps`;
+    // 平均Mbps（decimal） = totalBytes *8 / durationSec / 1e6
+    const avgMbps = (totalBytes * 8) / durationSec / 1_000_000;
+    statusDiv.textContent = `計測終了 ｜ 平均速度: ${avgMbps.toFixed(2)} Mbps`;
     resultDiv.innerHTML = `
-      合計読み込み: ${totalMiB.toFixed(2)} MiB<br>
+      合計読み込み: ${totalMiB.toFixed(2)} MiB (${totalBytes} bytes)<br>
       所要時間: ${durationSec.toFixed(3)} 秒<br>
-      平均速度: <strong>${mbps.toFixed(2)} Mbps</strong>
+      平均速度: <strong>${avgMbps.toFixed(2)} Mbps</strong>
     `;
     startBtn.disabled = false;
     stopBtn.disabled = true;
@@ -271,7 +287,7 @@
 
   function stopTest() {
     if (!running || !controller) return;
-    try { controller.abort(); } catch {}
+    try { controller.abort(); } catch(e) {}
     stopBtn.disabled = true;
     statusDiv.textContent = '強制停止中...';
   }
@@ -281,6 +297,7 @@
     startTest();
   });
   stopBtn.addEventListener('click', stopTest);
+
 })();
 </script>
 </body>
