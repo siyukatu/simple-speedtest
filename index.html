@@ -2,13 +2,13 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8" />
-<title>並列読み込みスピードテスト（修正版：単位と集計を修正）</title>
+<title>並列読み込みスピードテスト（修正版：集計整合 & キャッシュ可）</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <style>
   body { font-family: system-ui, -apple-system, Roboto, "Noto Sans JP", sans-serif; padding:20px; max-width:980px; margin:auto; }
   label { display:inline-block; margin:8px 0; }
   input[type="number"] { width:90px; margin-left:8px; }
-  input[type="text"] { width:260px; margin-left:8px; }
+  input[type="text"] { width:300px; margin-left:8px; }
   button { padding:8px 14px; border-radius:8px; border:0; background:#1b74e4; color:#fff; cursor:pointer; }
   button:disabled { background:#9bbbf7; cursor:not-allowed; }
   .bar { height:16px; background:#eee; border-radius:8px; overflow:hidden; margin-top:12px; }
@@ -19,17 +19,17 @@
 </style>
 </head>
 <body>
-  <h1>並列読み込みスピードテスト（単位＆集計修正）</h1>
-  <p class="muted">接続数デフォルト 25。ウォームアップと外れ値を除去して「現在速度」を表示します。合計読み込みで停止（全 Abort）。</p>
+  <h1>並列読み込みスピードテスト（修正版）</h1>
+  <p class="muted">接続デフォルト 25。ウォームアップと外れ値除去を行い、各接続の実際のウィンドウ時間で集計します。サーバーキャッシュ（Edge等）を有効のまま動作します。</p>
 
   <div>
     <label>接続数:
       <input id="connections" type="number" min="1" max="64" value="25" />
     </label>
-    <label style="margin-left:16px">目標 (MiB):
+    <label style="margin-left:12px">目標 (MiB):
       <input id="targetMiB" type="number" min="1" value="200" />
     </label>
-    <label style="margin-left:16px">ファイルURL:
+    <label style="margin-left:12px">ファイルURL:
       <input id="fileUrl" type="text" value="/25.dat" />
     </label>
   </div>
@@ -71,11 +71,12 @@
   const resultDiv = document.getElementById('result');
 
   const BYTES_PER_MIB = 1024 * 1024;
-  // parameters
-  const WARMUP_MS = 1000;
-  const WINDOW_MS = 500;
-  const UI_INTERVAL_MS = 200;
-  const SAMPLE_HISTORY = 20;
+
+  // パラメータ（必要なら調整可）
+  const WARMUP_MS = 1000;       // 各接続のウォームアップ時間
+  const WINDOW_MS = 500;        // 各接続のスライディングウィンドウ幅（max）
+  const UI_INTERVAL_MS = 200;   // UI 更新間隔
+  const SAMPLE_HISTORY = 20;    // 直近サンプル数（中央値/MAD 用）
   const MAD_MULTIPLIER = 3.0;
 
   let controller = null;
@@ -106,12 +107,13 @@
     return tr;
   }
 
+  // ワーカーループ（fetch の URL にキャッシュバストを付けない -> キャッシュ有効）
   async function workerLoop(index, signal, fileUrl) {
     const now = performance.now();
     const w = {
       index,
       bytes: 0,
-      // window fields for per-worker measurement
+      // window 用のフィールド（ウィンドウは最後の reset 時点からの累積）
       windowBytesForCalc: 0,
       windowStartForCalc: now,
       warmupUntil: now + WARMUP_MS,
@@ -124,10 +126,10 @@
     try {
       while (!signal.aborted) {
         w.state = 'fetching';
-        const url = fileUrl + '?_cb=' + Date.now() + Math.random();
+        const url = fileUrl; // キャッシュを使いたいのでクエリは付けない
         let response;
         try {
-          response = await fetch(url, { cache: 'no-store', signal });
+          response = await fetch(url, { cache: 'default', signal });
         } catch (err) {
           if (signal.aborted) break;
           w.state = 'error(fetch)';
@@ -147,10 +149,13 @@
           if (readResult.done) break;
           const chunk = readResult.value;
           const n = chunk.length;
+
+          // グローバル / ワーカーのバイトを更新
           totalBytes += n;
           w.bytes += n;
 
           const tnow = performance.now();
+          // ウィンドウが古ければリセット（最大 WINDOW_MS）
           if ((tnow - w.windowStartForCalc) > WINDOW_MS) {
             w.windowStartForCalc = tnow;
             w.windowBytesForCalc = 0;
@@ -161,13 +166,12 @@
             try { controller.abort(); } catch(e) {}
             break;
           }
-        }
+        } // read loop end
         try { reader.releaseLock?.(); } catch(e) {}
         await Promise.resolve();
-      }
+      } // main loop end
     } finally {
       w.state = signal.aborted ? 'aborted' : (w.state || 'finished');
-      // one final UI update for this worker
       updateUI();
     }
   }
@@ -181,24 +185,28 @@
     const progressPercent = Math.min(100, (totalBytes/targetBytes)*100) || 0;
     barFill.style.width = progressPercent + '%';
 
-    // --- 正しい瞬時速度計算 ---
-    // 全接続のウィンドウ中の合計バイト数を集計し、共通の windowSec で評価する
-    // ここでは UI 更新間隔をウィンドウ秒として使う（一定の time bucket）
-    const windowSec = Math.max(0.001, UI_INTERVAL_MS / 1000); // 固定ウィンドウ長（秒）
-    let sumWindowBytes = 0;
+    // --- 正しく集計する方法 ---
+    // 各接続について、その接続が保持する windowBytes とその実際の windowSec を使って
+    // bits/sec を計算し、それを全て合算する（各接続を同一時間幅で無理にそろえない）
+    // これにより「接続ごとに異なるウィンドウ長」での誇張を防ぐ。
+    let totalBitsPerSec = 0;
     workers.forEach(w => {
       if (!w) return;
-      // if still warming up, ignore its window bytes (treat as 0 in instant calc)
-      if (performance.now() < w.warmupUntil) return;
-      // use the worker's current window bytes (which reflect last <= WINDOW_MS)
-      sumWindowBytes += w.windowBytesForCalc;
+      // ウォームアップ期間中は無視（値に寄与させない）
+      if (now < w.warmupUntil) return;
+      // 実際のウィンドウ時間（ms）として、w.windowStartForCalc からの時間を使う（最大 WINDOW_MS）
+      const winMs = Math.max(1, Math.min(WINDOW_MS, now - w.windowStartForCalc));
+      const winSec = winMs / 1000;
+      // bits in window = bytes * 8
+      const bitsInWindow = w.windowBytesForCalc * 8;
+      const bitsPerSec = bitsInWindow / winSec; // bits/second for this worker
+      if (isFinite(bitsPerSec)) totalBitsPerSec += bitsPerSec;
     });
-    // bits/sec = sumWindowBytes * 8 / windowSec
-    const bitsPerSec = (sumWindowBytes * 8) / windowSec;
-    // Mbps (decimal) = bitsPerSec / 1_000_000
-    const instantMbpsRaw = bitsPerSec / 1_000_000;
 
-    // push sample history and perform median+MAD filtering
+    // decimal Mbps に変換
+    const instantMbpsRaw = totalBitsPerSec / 1_000_000;
+
+    // サンプル履歴と中央値+MAD による外れ値除去
     recentTotalSamples.push(instantMbpsRaw);
     if (recentTotalSamples.length > SAMPLE_HISTORY) recentTotalSamples.shift();
     const med = median(recentTotalSamples);
@@ -207,21 +215,19 @@
     const filtered = recentTotalSamples.filter(s => Math.abs(s - med) <= threshold);
     const instantMbpsFiltered = filtered.length ? (filtered.reduce((a,b)=>a+b,0)/filtered.length) : med;
 
-    // status: 接続数・現在速度（フィルタ済）・合計
     statusDiv.textContent = `接続: ${workers.length} ｜ 現在速度 (フィルタ済): ${instantMbpsFiltered.toFixed(2)} Mbps ｜ 合計: ${totalMiB.toFixed(2)} MiB`;
 
-    // per-connection rows
+    // per-connection 表示（各接続の瞬時 Mbps は接続個別の windowSec を使う）
     workers.forEach((w, i) => {
       const row = document.getElementById('conn-row-' + i);
       if (!row) return;
       const cells = row.children;
       cells[1].textContent = (w.bytes / BYTES_PER_MIB).toFixed(2);
-      cells[2].textContent = w.state + (performance.now() < w.warmupUntil ? ' (warmup)' : '');
-      // per-connection instant (convert to Mbps decimal)
-      const winMs = Math.max(1, Math.min(WINDOW_MS, performance.now() - w.windowStartForCalc));
+      cells[2].textContent = w.state + (now < w.warmupUntil ? ' (warmup)' : '');
+      const winMs = Math.max(1, Math.min(WINDOW_MS, now - w.windowStartForCalc));
       const winSec = winMs / 1000;
-      const mbits = (w.windowBytesForCalc * 8) / 1_000_000; // Mbit over window
-      const connMbps = isFinite(mbits / winSec) ? (mbits / winSec).toFixed(2) : '0.00';
+      const connBits = w.windowBytesForCalc * 8;
+      const connMbps = isFinite(connBits / winSec / 1_000_000) ? ((connBits / winSec) / 1_000_000).toFixed(2) : '0.00';
       cells[3].textContent = connMbps;
     });
   }
@@ -271,7 +277,7 @@
     const endTime = performance.now();
     const durationSec = Math.max(0.001, (endTime - startTime) / 1000);
     const totalMiB = totalBytes / BYTES_PER_MIB;
-    // 平均Mbps（decimal） = totalBytes *8 / durationSec / 1e6
+    // 平均 Mbps (decimal)
     const avgMbps = (totalBytes * 8) / durationSec / 1_000_000;
     statusDiv.textContent = `計測終了 ｜ 平均速度: ${avgMbps.toFixed(2)} Mbps`;
     resultDiv.innerHTML = `
