@@ -29,9 +29,7 @@
     <label style="margin-left:12px">目標 (MiB):
       <input id="targetMiB" type="number" min="1" value="1000" />
     </label>
-    <label style="margin-left:12px">ファイルURL:
-      <input id="fileUrl" type="text" value="/10.dat" disabled />
-    </label>
+    
   </div>
 
   <div style="margin-top:10px">
@@ -47,14 +45,11 @@
     <label style="margin-left:12px">目標 (MiB):
       <input id="uploadTargetMiB" type="number" min="1" value="200" />
     </label>
-    <label style="margin-left:12px">アップロードURL:
-      <input id="uploadUrl" type="text" value="/upload" disabled />
-    </label>
+    
   </div>
 
   <div style="margin-top:10px">
-    <button id="startUploadBtn">アップロード開始</button>
-    <button id="stopUploadBtn" disabled style="margin-left:8px; background:#e74c3c">アップロード停止</button>
+    <!-- 個別のアップロード開始/停止ボタンは廃止（常にダウンロード→アップロードの一連で実行） -->
   </div>
 
   <div id="uploadStatus" style="margin-top:10px" class="muted"></div>
@@ -89,7 +84,6 @@
 (() => {
   const connectionsInput = document.getElementById('connections');
   const targetMiBInput = document.getElementById('targetMiB');
-  const fileUrlInput = document.getElementById('fileUrl');
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
   const statusDiv = document.getElementById('status');
@@ -102,6 +96,10 @@
   const resultDiv = document.getElementById('result');
 
   const BYTES_PER_MIB = 1024 * 1024;
+
+  // 固定 URL（変更不可）
+  const DOWNLOAD_URL = '/10.dat';
+  const UPLOAD_URL = '/upload';
 
   // パラメータ（必要なら調整可）
   const WARMUP_MS = 1000;       // 各接続のウォームアップ時間
@@ -394,9 +392,9 @@
 
   function startTest() {
     if (running) return;
-    const connCount = Math.max(1, Math.min(64, parseInt(connectionsInput.value || 25)));
-    const targetMiB = Math.max(1, parseFloat(targetMiBInput.value || 200));
-    const fileUrl = fileUrlInput.value.trim() || '/25.dat';
+  const connCount = Math.max(1, Math.min(64, parseInt(connectionsInput.value || 25)));
+  const targetMiB = Math.max(1, parseFloat(targetMiBInput.value || 200));
+  const fileUrl = DOWNLOAD_URL;
 
     controller = new AbortController();
     totalBytes = 0;
@@ -482,17 +480,14 @@
   stopBtn.addEventListener('click', stopTest);
 
   // Upload controls
-  const startUploadBtn = document.getElementById('startUploadBtn');
-  const stopUploadBtn = document.getElementById('stopUploadBtn');
   const uploadConnectionsInput = document.getElementById('uploadConnections');
   const uploadTargetMiBInput = document.getElementById('uploadTargetMiB');
-  const uploadUrlInput = document.getElementById('uploadUrl');
 
   function startUploadTest() {
     if (uploadRunning) return;
-    const connCount = Math.max(1, Math.min(64, parseInt(uploadConnectionsInput.value || 2)));
-    const targetMiB = Math.max(1, parseFloat(uploadTargetMiBInput.value || 100));
-    const uploadUrl = uploadUrlInput.value.trim() || '/upload';
+  const connCount = Math.max(1, Math.min(64, parseInt(uploadConnectionsInput.value || 2)));
+  const targetMiB = Math.max(1, parseFloat(uploadTargetMiBInput.value || 100));
+  const uploadUrl = UPLOAD_URL;
 
     uploadController = new AbortController();
     uploadTotalBytes = 0;
@@ -503,8 +498,7 @@
     document.getElementById('uploadConnTable').style.display = 'none';
     uploadRecentSamples.length = 0;
     document.getElementById('uploadStatus').textContent = `接続を ${connCount} 本でアップロード開始中...`;
-    startUploadBtn.disabled = true;
-    stopUploadBtn.disabled = false;
+  // no separate upload start/stop buttons in combined mode
     uploadRunning = true;
 
     for (let i = 0; i < connCount; i++) {
@@ -537,8 +531,7 @@
     // show a compact result area (append inside resultDiv)
     const prev = resultDiv.innerHTML;
     resultDiv.innerHTML = prev + `<div style="margin-top:6px">アップロード: 合計送信 ${totalMiB.toFixed(2)} MiB (${uploadTotalBytes} bytes) ／ 所要時間 ${durationSec.toFixed(3)} 秒 ／ 平均 ${avgMbps.toFixed(2)} Mbps</div>`;
-    startUploadBtn.disabled = false;
-    stopUploadBtn.disabled = true;
+  // no separate upload start/stop buttons in combined mode
     uploadRunning = false;
     updateUI();
   }
@@ -546,15 +539,10 @@
   function stopUploadTest() {
     if (!uploadRunning || !uploadController) return;
     try { uploadController.abort(); } catch(e) {}
-    stopUploadBtn.disabled = true;
     document.getElementById('uploadStatus').textContent = 'アップロード強制停止中...';
   }
 
-  startUploadBtn.addEventListener('click', () => {
-    document.getElementById('uploadGoalMiB').textContent = parseFloat(uploadTargetMiBInput.value || 0).toFixed(2);
-    startUploadTest();
-  });
-  stopUploadBtn.addEventListener('click', stopUploadTest);
+  // Upload is always run as part of the combined test; no separate upload buttons.
 
 })();
 </script>
