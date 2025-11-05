@@ -30,7 +30,7 @@
       <input id="targetMiB" type="number" min="1" value="1000" />
     </label>
     <label style="margin-left:12px">ファイルURL:
-      <input id="fileUrl" type="text" value="/10.dat" />
+      <input id="fileUrl" type="text" value="/10.dat" disabled />
     </label>
   </div>
 
@@ -48,7 +48,7 @@
       <input id="uploadTargetMiB" type="number" min="1" value="200" />
     </label>
     <label style="margin-left:12px">アップロードURL:
-      <input id="uploadUrl" type="text" value="/upload" />
+      <input id="uploadUrl" type="text" value="/upload" disabled />
     </label>
   </div>
 
@@ -419,7 +419,7 @@
     statsInterval = setInterval(updateUI, UI_INTERVAL_MS);
     updateUI();
 
-    (async () => {
+    const downloadDone = (async () => {
       try {
         await new Promise(resolve => {
           const sig = controller.signal;
@@ -430,6 +430,7 @@
         finalize();
       }
     })();
+    return downloadDone;
   }
 
   function finalize() {
@@ -445,7 +446,8 @@
       所要時間: ${durationSec.toFixed(3)} 秒<br>
       平均速度: <strong>${avgMbps.toFixed(2)} Mbps</strong>
     `;
-    startBtn.disabled = false;
+    // Note: don't re-enable the global start button here when running combined test;
+    // the caller (start button handler) controls overall flow. Keep stop button disabled.
     stopBtn.disabled = true;
     running = false;
     updateUI();
@@ -459,8 +461,23 @@
   }
 
   startBtn.addEventListener('click', () => {
-    goalMiBSpan.textContent = parseFloat(targetMiBInput.value || 0).toFixed(2);
-    startTest();
+    (async () => {
+      // Combined flow: download then upload
+      startBtn.disabled = true;
+      try {
+        goalMiBSpan.textContent = parseFloat(targetMiBInput.value || 0).toFixed(2);
+        await startTest();
+        // small pause
+        await new Promise(r => setTimeout(r, 200));
+        // start upload
+        document.getElementById('uploadGoalMiB').textContent = parseFloat(uploadTargetMiBInput.value || 0).toFixed(2);
+        await startUploadTest();
+      } catch (err) {
+        console.error('combined test error', err);
+      } finally {
+        startBtn.disabled = false;
+      }
+    })();
   });
   stopBtn.addEventListener('click', stopTest);
 
@@ -496,8 +513,7 @@
 
     uploadStatsInterval = setInterval(updateUI, UI_INTERVAL_MS);
     updateUI();
-
-    (async () => {
+    const uploadDone = (async () => {
       try {
         await new Promise(resolve => {
           const sig = uploadController.signal;
@@ -508,6 +524,7 @@
         finalizeUpload();
       }
     })();
+    return uploadDone;
   }
 
   function finalizeUpload() {
