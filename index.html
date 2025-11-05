@@ -185,10 +185,11 @@
         } catch (err) {
           if (signal.aborted) break;
           w.state = 'error(fetch)';
+          w.err = err && err.message ? err.message : String(err);
           await new Promise(r => setTimeout(r, 300));
           continue;
         }
-        if (!response.ok) { w.state = 'error(status:' + response.status + ')'; await new Promise(r=>setTimeout(r,300)); continue; }
+        if (!response.ok) { w.state = 'error(status:' + response.status + ')'; w.err = `status:${response.status}`; await new Promise(r=>setTimeout(r,300)); continue; }
 
         const reader = response.body.getReader();
         w.state = 'reading';
@@ -250,55 +251,31 @@
     try {
       while (!signal.aborted) {
         w.state = 'preparing';
-        // Create readable stream body that pushes chunks up to reqBytes
-        let bytesPushedForReq = 0;
-        const chunk = new Uint8Array(UPLOAD_CHUNK_SIZE);
-        // Fill chunk (zeros) - content doesn't matter
-
-        const stream = new ReadableStream({
-          pull(ctrl) {
-            if (signal.aborted) { try { ctrl.close(); } catch(e){}; return; }
-            const remain = reqBytes - bytesPushedForReq;
-            if (remain <= 0) { try { ctrl.close(); } catch(e){}; return; }
-            const toPush = Math.min(UPLOAD_CHUNK_SIZE, remain);
-            if (toPush === UPLOAD_CHUNK_SIZE) {
-              ctrl.enqueue(chunk);
-              bytesPushedForReq += toPush;
-              // update counters
-              uploadTotalBytes += toPush;
-              w.bytes += toPush;
-              // window reset if too old
-              const tnow = performance.now();
-              if ((tnow - w.windowStartForCalc) > WINDOW_MS) {
-                w.windowStartForCalc = tnow;
-                w.windowBytesForCalc = 0;
-              }
-              w.windowBytesForCalc += toPush;
-              return;
-            } else {
-              // push a slice
-              ctrl.enqueue(chunk.subarray(0, toPush));
-              bytesPushedForReq += toPush;
-              uploadTotalBytes += toPush;
-              w.bytes += toPush;
-              const tnow = performance.now();
-              if ((tnow - w.windowStartForCalc) > WINDOW_MS) {
-                w.windowStartForCalc = tnow;
-                w.windowBytesForCalc = 0;
-              }
-              w.windowBytesForCalc += toPush;
-              try { ctrl.close(); } catch(e) {}
-              return;
-            }
-          }
-        });
-
+        // Use a Blob body for better server compatibility (some servers reject chunked streaming)
         w.state = 'uploading';
         try {
-          await fetch(uploadUrl, { method: 'POST', body: stream, signal });
+          // create a buffer filled with zeros. Keep memory reasonable (perRequestMiB default 1MiB)
+          const buf = new Uint8Array(reqBytes);
+          const resp = await fetch(uploadUrl, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' }, signal });
+          if (!resp.ok) {
+            w.state = 'error(status:' + resp.status + ')';
+            w.err = `status:${resp.status}`;
+            await new Promise(r => setTimeout(r, 300));
+            continue;
+          }
+          // count bytes only on successful send
+          uploadTotalBytes += reqBytes;
+          w.bytes += reqBytes;
+          const tnow = performance.now();
+          if ((tnow - w.windowStartForCalc) > WINDOW_MS) {
+            w.windowStartForCalc = tnow;
+            w.windowBytesForCalc = 0;
+          }
+          w.windowBytesForCalc += reqBytes;
         } catch (err) {
           if (signal.aborted) break;
           w.state = 'error(fetch)';
+          w.err = err && err.message ? err.message : String(err);
           // small pause then retry
           await new Promise(r => setTimeout(r, 300));
           continue;
@@ -361,9 +338,9 @@
     workers.forEach((w, i) => {
       const row = document.getElementById('conn-row-' + i);
       if (!row) return;
-      const cells = row.children;
-      cells[1].textContent = (w.bytes / BYTES_PER_MIB).toFixed(2);
-      cells[2].textContent = w.state + (now < w.warmupUntil ? ' (warmup)' : '');
+  const cells = row.children;
+  cells[1].textContent = (w.bytes / BYTES_PER_MIB).toFixed(2);
+  cells[2].textContent = w.state + (now < w.warmupUntil ? ' (warmup)' : '') + (w.err ? ' — ' + w.err : '');
       const winMs = Math.max(1, Math.min(WINDOW_MS, now - w.windowStartForCalc));
       const winSec = winMs / 1000;
       const connBits = w.windowBytesForCalc * 8;
@@ -404,9 +381,9 @@
     uploadWorkers.forEach((w, i) => {
       const row = document.getElementById('upload-conn-row-' + i);
       if (!row) return;
-      const cells = row.children;
-      cells[1].textContent = (w.bytes / BYTES_PER_MIB).toFixed(2);
-      cells[2].textContent = w.state + (upNow < w.warmupUntil ? ' (warmup)' : '');
+  const cells = row.children;
+  cells[1].textContent = (w.bytes / BYTES_PER_MIB).toFixed(2);
+  cells[2].textContent = w.state + (upNow < w.warmupUntil ? ' (warmup)' : '') + (w.err ? ' — ' + w.err : '');
       const winMs = Math.max(1, Math.min(WINDOW_MS, upNow - w.windowStartForCalc));
       const winSec = winMs / 1000;
       const connBits = (w.windowBytesForCalc || 0) * 8;
