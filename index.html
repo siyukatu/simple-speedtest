@@ -257,23 +257,7 @@
           // create a buffer filled with zeros. Keep memory reasonable (perRequestMiB default 1MiB)
           const buf = new Uint8Array(reqBytes);
           const resp = await fetch(uploadUrl, { method: 'POST', body: buf, headers: { 'Content-Type': 'application/octet-stream' }, signal });
-          if (!resp.ok) {
-            // If server returns 405 (static site: Method Not Allowed), treat as "sent" from client perspective
-            if (resp.status === 405) {
-              w.state = 'status:405(ignored)';
-              w.err = `status:${resp.status}`;
-              // still count bytes as client-side sent
-              uploadTotalBytes += reqBytes;
-              w.bytes += reqBytes;
-              const tnow = performance.now();
-              if ((tnow - w.windowStartForCalc) > WINDOW_MS) {
-                w.windowStartForCalc = tnow;
-                w.windowBytesForCalc = 0;
-              }
-              w.windowBytesForCalc += reqBytes;
-              // continue to next iteration (no delay)
-              continue;
-            }
+          if (!resp.ok && resp.status !== 405) {
             w.state = 'error(status:' + resp.status + ')';
             w.err = `status:${resp.status}`;
             await new Promise(r => setTimeout(r, 300));
