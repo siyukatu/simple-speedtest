@@ -469,7 +469,7 @@
         await new Promise(r => setTimeout(r, 200));
         // start upload
         document.getElementById('uploadGoalMiB').textContent = parseFloat(uploadTargetMiBInput.value || 0).toFixed(2);
-        await startUploadTest();
+//        await startUploadTest();
       } catch (err) {
         console.error('combined test error', err);
       } finally {
